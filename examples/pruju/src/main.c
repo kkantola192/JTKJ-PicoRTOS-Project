@@ -8,15 +8,23 @@
 #include <queue.h>
 #include <task.h>
 
-#include "tkjhat/sdk.h"
+#include <tusb.h>
+#include "usbSerialDebug/helper.h"
+#include <tkjhat/sdk.h>
 
-//global variable to store pico rotation. default 0
-char picoPos = 0;
+#define DEF_STACK_SIZE 1024
+
+//global variable to store pico rotation. default empty space
+char picoPos = '\n';
 //global variable to store message to be sent, empty by default
-uint8_t msg[24];
+uint8_t msg[255];
+//global variables to
+static volatile uint8_t char_save, send_msg;
+//global variable to store index of message array
+uint8_t msgIndex = 0;
 
 void imuTask(void *parameters);
-void serialTask(char* message);
+void serialTask(void* parameters);
 
 void imuTask(void *parameters) {
 
@@ -29,23 +37,27 @@ void imuTask(void *parameters) {
         printf("failed to initialize imu");
     }
 
-    uint8_t imuData[3];
     //update position infinitely until interrupted
     while (1)
     {
         if (ICM42670_read_sensor_data(&ax, &ay, &az, &gx, &gy, &gz, &t) == 0) {
-            imuData[0] = ax;
-            imuData[1] = ay;
-            imuData[2] = az;
             
             //check pico position by accel sensor
-            if ((imuData[1] >= 0.9) || (imuData[1] <= -0.9)){
+            if (ay>=0.9 || ay<=-0.9) {
                 picoPos = '-';
-            } else if ((imuData[2] >= 0.9) || (imuData[2]<=-0.9) ) {
+            } else if (az>=0.9 || az<=-0.9) {
                 picoPos = '.';
-            } else if ((imuData[0]) >= 0.9 || (imuData[0]<=-0.9)) {
+            } else if (ax >= 0.9 || ax <= -0.9) {
                 picoPos = ' ';
             }
+            
+            if (char_save) {
+                msg[msgIndex+1] = '\n';
+                msg[msgIndex] = picoPos;
+                msgIndex++;
+                char_save = false;
+            }
+        } else {
             printf("Failed to read imu data\n");
         }
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -53,30 +65,58 @@ void imuTask(void *parameters) {
 
 }
 
-void printSerialTask(char* message) {
-    if (message != NULL) {
-        usb_serial_print(message);
-    } else {
-        usb_serial_print('error: null message');
-    }
+void serialTask(void* parameters) {
+    uint8_t* message = msg;
+    while(1) {
+        if (send_msg) {
+            if (message != NULL) {
+            usb_serial_print(message);
+            send_msg = false;
+            msgIndex = 0;
+            memset(msg, 0, sizeof(msg));
+            } else if (message == NULL) {
+            usb_serial_print("NULL message\n");
+            }
         }
-
-static void btn_fxn(uint gpio, uint32_t eventMask) {
-    
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }    
 }
 
- void main() {
+static void usbTask(void *arg) {
+    (void)arg;
+    while (1) {
+        tud_task();              // With FreeRTOS wait for events
+                                 // Do not add vTaskDelay. 
+    }
+}
+
+static void btn_fxn(uint gpio, uint32_t eventMask) {
+    if (gpio==SW1_PIN) {
+        char_save = true;
+          usb_serial_print("TESTI 1\n");
+    } else if (gpio==SW2_PIN) {
+        send_msg = true;
+          usb_serial_print("TESTI 2 \n");
+    }   
+}
+
+ int main(void) {
+    stdio_init_all();
     init_i2c_default();
+    sleep_ms(300);
     init_sw1();
     init_sw2();
     gpio_set_irq_enabled_with_callback(SW1_PIN, GPIO_IRQ_EDGE_FALL, true, btn_fxn);
+    gpio_set_irq_enabled_with_callback(SW2_PIN, GPIO_IRQ_EDGE_FALL, true, btn_fxn);
+  
 
 
-    TaskHandle_t hImuTask, hPrintSerialTask, hUSB = NULL;
+    TaskHandle_t hImuTask, hserialTask, hUSB = NULL;
 
 //IMU task creation
     BaseType_t result = xTaskCreate(imuTask, //task
-                1024, //stack size default?
+                "imu", //name
+                DEF_STACK_SIZE, //stack size default?
                 NULL, //arguments
                 2, //priority
                 &hImuTask //task handle
@@ -86,14 +126,25 @@ static void btn_fxn(uint gpio, uint32_t eventMask) {
         return 0;
     }
 //serial print task creation
-    result = xTaskCreate(printSerialTask, //task
-                1024, //stack size default?
+    result = xTaskCreate(serialTask, //task
+                "serialPrint", //task name
+                DEF_STACK_SIZE, //stack size default?
                 NULL, //arguments
-                2, //priority
-                &hImuTask //task handle
+                3, //priority
+                &hserialTask //task handle
     );
     if(result != pdPASS) {
         printf("Serial Print Task creation failed\n");
         return 0;
     }
+//USB task creation
+    result = xTaskCreate(usbTask, "usb", DEF_STACK_SIZE, NULL, 4, &hUSB);
+    if(result != pdPASS) {
+        printf("USB Task creation failed\n");
+        return 0;
+    }
+
+    tusb_init();
+    usb_serial_init();
+    vTaskStartScheduler();
  }
