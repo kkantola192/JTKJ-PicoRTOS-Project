@@ -1,4 +1,6 @@
-
+// Konsta Kantola, 2408098. Anton Latvala 2308934
+// Work distribution 50/50, so 3 points each.
+//
 #include <stdio.h>
 #include <string.h>
 
@@ -8,223 +10,155 @@
 #include <queue.h>
 #include <task.h>
 
-#include "tkjhat/sdk.h"
+#include <tusb.h>
+#include "usbSerialDebug/helper.h"
+#include <tkjhat/sdk.h>
 
-// Exercise 4. Include the libraries necessaries to use the usb-serial-debug, and tinyusb
-// Tehtävä 4 . Lisää usb-serial-debugin ja tinyusbin käyttämiseen tarvittavat kirjastot.
+#define DEF_STACK_SIZE 1024
 
+//global variable to store pico rotation. default newline
+char picoPos = '\n';
+//global variable to store message to be sent, empty by default, 255 elements
+uint8_t msg[255];
+//global variables to save button states
+static volatile uint8_t char_save, send_msg;
+//global variable to store index of message array, iterated in imuTask, reset in serialTask
+uint8_t msgIndex = 0;
 
+void imuTask(void *parameters);
+void serialTask(void* parameters);
 
-#define DEFAULT_STACK_SIZE 2048
-#define CDC_ITF_TX      1
+//task to handle IMU data and translating it to an appropriate character
+void imuTask(void *parameters) {
 
+    //variables for IMU data, only ax, ay, az are used
+    float ax, ay, az, gx, gy, gz, t;
 
-// Tehtävä 3: Tilakoneen esittely Add missing states.
-// Exercise 3: Definition of the state machine. Add missing states.
-enum state { WAITING=1, DATA_READY=2 };
-enum state programState = WAITING;
-
-// Tehtävä 3: Valoisuuden globaali muuttuja
-// Exercise 3: Global variable for ambient light
-uint32_t ambientLight;
-
-static void btn_fxn(uint gpio, uint32_t eventMask) {
-    // Tehtävä 1: Vaihda LEDin tila käyttämällä TKJHAT SDK:n sopivaa funktiota.
-    // Exercise 1: Toggle the LED using the appropriate function from the TKJHAT SDK.
-    toggle_red_led();
-}
-
-static void sensor_task(void *arg){
-    (void)arg;
-    // Tehtävä 2: Alusta valoisuusanturi. Etsi SDK-dokumentaatiosta sopiva funktio.
-    // Exercise 2: Init the light sensor. Find in the SDK documentation the adequate function.
-    init_i2c_default();
-    init_veml6030();
-   
-    for(;;){
-        
-        // Tehtävä 2: Muokkaa tästä eteenpäin sovelluskoodilla. Kommentoi seuraava rivi.
-        // 
-        // Exercise 2: Modify with application code here. Comment following line.
-        //             Read sensor data and print it out as string; 
-        //tight_loop_contents(); 
-
-        while(1) {
-            //uint32_t lux = veml6030_read_light();
-            //printf("Ambient light: %d lux\n", lux);
-            //sleep_ms(200);
-            if (programState == WAITING) {
-            ambientLight = veml6030_read_light();
-            programState = DATA_READY;
-            }
+    if (init_ICM42670()==0)	{
+        if (ICM42670_start_with_default_values()==0) {
         }
-
-
-   
-
-
-        // Tehtävä 3:  Muokkaa aiemmin Tehtävässä 2 tehtyä koodia ylempänä.
-        //             Jos olet oikeassa tilassa, tallenna anturin arvo tulostamisen sijaan
-        //             globaaliin muuttujaan.
-        //             Sen jälkeen muuta tilaa.
-        // Exercise 3: Modify previous code done for Exercise 2, in previous lines. 
-        //             If you are in adequate state, instead of printing save the sensor value 
-        //             into the global variable.
-        //             After that, modify state
-
-
-
-
-
-        
-        // Exercise 2. Just for sanity check. Please, comment this out
-        // Tehtävä 2: Just for sanity check. Please, comment this out
-        //printf("sensorTask\n");
-
-        // Do not remove this
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    } else {
+        printf("failed to initialize imu");
     }
-}
 
-static void print_task(void *arg){
-    (void)arg;
-    
-    while(1){
-        
-        // Tehtävä 3: Kun tila on oikea, tulosta sensoridata merkkijonossa serial-monitor-ikkunaan
-        //            Muista tilamuutos
-        //            Älä unohda kommentoida seuraavaa koodiriviä.
-        // Exercise 3: Print out sensor data as string to serial monitor if the state is correct
-        //             Remember to modify state
-        //             Do not forget to comment next line of code.
-        if (programState == DATA_READY) {
-            printf("Ambient light: %d lux\n", ambientLight);
-            programState = WAITING;
+    //update position infinitely until interrupted
+    while (1)
+    {
+        if (ICM42670_read_sensor_data(&ax, &ay, &az, &gx, &gy, &gz, &t) == 0) {
+            
+            //check pico position by accel sensor
+            //max accel per axis is ~1, 0.9 is plenty high threshold to prevent issues
+            //check both extremes of accel data so that messages can be sent regardless of direction, only care about orientation
+            if (ay>=0.9 || ay<=-0.9) {
+                picoPos = '-';
+            } else if (az>=0.9 || az<=-0.9) {
+                picoPos = '.';
+            } else if (ax >= 0.9 || ax <= -0.9) {
+                picoPos = ' ';
+            }
+            //handles checking user input to save current character to msg array
+            if (char_save) {
+                //sets a \n to the end of the message for usb_serial_print, would probably more sensible to handle in printTask?
+                //doesn't check whether or not the message array is full, so this could cause issues with >254 character messages
+                msg[msgIndex+1] = '\n';
+                msg[msgIndex] = picoPos;
+                msgIndex++;
+                char_save = false;
+            }
+        } else {
+            printf("Failed to read imu data\n");
         }
-        //tight_loop_contents();
-        
-
-
-        
-        // Exercise 4. Use usb_serial_print() instead of printf() for debug output
-        //             produced after the USB serial library has been initialized.
-        //             Do not replace error messages that can execute before usb_serial_init().
-        //             Use the TinyUSB library to send data through the other serial port (CDC 1).
-        //             You can use the functions at https://github.com/hathach/tinyusb/blob/master/src/class/cdc/cdc_device.h
-        //             You can find an example at hello_dual_cdc
-        //             The data written using this should be provided using csv
-        //             timestamp, illuminance
-        // Tehtävä 4. Käytä usb_serial_print()-funktiota printf()-funktion sijaan
-        //            debug-tulostukseen sen jälkeen, kun USB-sarjaliikennekirjasto on alustettu.
-        //            Älä korvaa virheilmoituksia, jotka voivat suorittua ennen usb_serial_init()-kutsua.
-        //            Käytä TinyUSB-kirjastoa datan lähettämiseen toisen sarjaportin (CDC 1) kautta.
-        //            Voit käyttää funktioita: https://github.com/hathach/tinyusb/blob/master/src/class/cdc/cdc_device.h
-        //            Esimerkki löytyy hello_dual_cdc-projektista.
-        //            Tällä menetelmällä kirjoitettu data tulee antaa CSV-muodossa:
-        //            timestamp, illuminance
-
-
-
-
-        // Exercise 3. Just for sanity check. Please, comment this out
-        // Tehtävä 3: Just for sanity check. Please, comment this out
-        //printf("printTask\n");
-        
-        // Do not remove this
         vTaskDelay(pdMS_TO_TICKS(500));
     }
+
+}
+//Task to send message over serial via USB
+void serialTask(void* parameters) {
+//Define message array pointer
+    uint8_t* message = msg;
+    while(1) {
+        //Send message 
+        if (send_msg) {
+                //check for a null message pointer, shouldn't ever happen
+                //but I guess it'll be fine to check regardless
+            if (message != NULL) {
+                //send message over serial, clear msg related variables to prepare for next message
+            usb_serial_print(message);
+            send_msg = false;
+            msgIndex = 0;
+            memset(msg, 0, sizeof(msg));
+            } else if (message == NULL) {
+                //send error message over serial, once again, shouldn't really happen but eh, whatever
+            usb_serial_print("NULL message\n");
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }    
 }
 
-
-// Exercise 4: Uncomment the following line to activate the TinyUSB library.  
-// Tehtävä 4:  Poista seuraavan rivin kommentointi aktivoidaksesi TinyUSB-kirjaston. 
-
-/*
 static void usbTask(void *arg) {
     (void)arg;
     while (1) {
         tud_task();              // With FreeRTOS wait for events
                                  // Do not add vTaskDelay. 
     }
-}*/
-
-int main() {
-
-    // Exercise 4: Comment the statement stdio_init_all(); 
-    //             Instead, add AT THE END OF MAIN (before vTaskStartScheduler();) adequate statements to enable the TinyUSB library and the usb-serial-debug.
-    //             You can see hello_dual_cdc for help
-    //             In CMakeLists.txt add usb_serial_debug to target_link_libraries.
-    //             In CMakeLists.txt deactivate pico_enable_stdio_usb
-    // Tehtävä 4:  Kommentoi lause stdio_init_all();
-    //             Sen sijaan lisää MAIN LOPPUUN (ennen vTaskStartScheduler();) tarvittavat komennot aktivoidaksesi TinyUSB-kirjaston ja usb-serial-debugin.
-    //             Voit katsoa apua esimerkistä hello_dual_cdc.
-    //             Lisää CMakeLists.txt-tiedoston target_link_libraries-kohtaan usb_serial_debug.
-    //             Poista CMakeLists.txt-tiedostosta käytöstä pico_enable_stdio_usb
-
-    stdio_init_all();
-
-    // Uncomment this lines if you want to wait till the serial monitor is connected
-    /*while (!stdio_usb_connected()){
-        sleep_ms(10);
-    }*/ 
-    
-    init_hat_sdk();
-    sleep_ms(300); //Wait some time so initialization of USB and hat is done.
-
-    // Exercise 1: Initialize the button and the led and define an register the corresponding interrupton.
-    //             Interruption handler is defined up as btn_fxninit_button(sw1);
-    // Tehtävä 1:  Alusta painike ja LEd ja rekisteröi vastaava keskeytys.
-    //             Keskeytyskäsittelijä on määritelty yläpuolella nimellä btn_fxn
-    init_sw1();
-    init_red_led();
-    gpio_set_irq_enabled_with_callback(SW1_PIN, GPIO_IRQ_EDGE_FALL, true, btn_fxn);
-
-
-
-    
-    
-    TaskHandle_t hSensorTask, hPrintTask, hUSB = NULL;
-
-    // Exercise 4: Uncomment this xTaskCreate to create the task that enables dual USB communication.
-    // Tehtävä 4: Poista tämän xTaskCreate-rivin kommentointi luodaksesi tehtävän,
-    // joka mahdollistaa kaksikanavaisen USB-viestinnän.
-
-    /*
-    xTaskCreate(usbTask, "usb", 2048, NULL, 3, &hUSB);
-    #if (configNUMBER_OF_CORES > 1)
-        vTaskCoreAffinitySet(hUSB, 1u << 0);
-    #endif
-    */
-
-
-    // Create the tasks with xTaskCreate
-    BaseType_t result = xTaskCreate(sensor_task, // (en) Task function
-                "sensor",                        // (en) Name of the task 
-                DEFAULT_STACK_SIZE,              // (en) Size of the stack for this task (in words). Generally 1024 or 2048
-                NULL,                            // (en) Arguments of the task 
-                2,                               // (en) Priority of this task
-                &hSensorTask);                   // (en) A handle to control the execution of this task
-
-    if(result != pdPASS) {
-        printf("Sensor task creation failed\n");
-        return 0;
-    }
-    result = xTaskCreate(print_task,  // (en) Task function
-                "print",              // (en) Name of the task 
-                DEFAULT_STACK_SIZE,   // (en) Size of the stack for this task (in words). Generally 1024 or 2048
-                NULL,                 // (en) Arguments of the task 
-                2,                    // (en) Priority of this task
-                &hPrintTask);         // (en) A handle to control the execution of this task
-
-    if(result != pdPASS) {
-        printf("Print Task creation failed\n");
-        return 0;
-    }
-
-    // Start the scheduler (never returns)
-    vTaskStartScheduler();
-    
-    // Never reach this line.
-    return 0;
 }
 
+static void btn_fxn(uint gpio, uint32_t eventMask) {
+    //check which button is pressed, change state accordingly, also gives priority to character save over msg send
+    //states are set false when input is handled
+    if (gpio==SW1_PIN) {
+        char_save = true;
+          //usb_serial_print("TESTI 1\n");
+    } else if (gpio==SW2_PIN) {
+        send_msg = true;
+         //usb_serial_print("TESTI 2 \n");
+    }   
+}
+
+ int main(void) {
+    stdio_init_all();
+    init_i2c_default();
+    sleep_ms(300);    //wait for initialization
+    init_sw1();
+    init_sw2();
+    gpio_set_irq_enabled_with_callback(SW1_PIN, GPIO_IRQ_EDGE_FALL, true, btn_fxn);
+    gpio_set_irq_enabled_with_callback(SW2_PIN, GPIO_IRQ_EDGE_FALL, true, btn_fxn);
+
+    TaskHandle_t hImuTask, hserialTask, hUSB = NULL;
+
+//IMU task creation
+    BaseType_t result = xTaskCreate(imuTask, //task
+                "imu", //name
+                DEF_STACK_SIZE, //stack size
+                NULL, //arguments
+                2, //priority
+                &hImuTask //task handle
+    );
+    if(result != pdPASS) {
+        printf("IMU Task creation failed\n");
+        return 0;
+    }
+//serial print task creation
+    result = xTaskCreate(serialTask, //task
+                "serialPrint", //task name, actual task is serialTask, was renamed at some point and didn't think to change this
+                DEF_STACK_SIZE, //stack size
+                NULL, //arguments
+                3, //priority
+                &hserialTask //task handle
+    );
+    if(result != pdPASS) {
+        printf("Serial Print Task creation failed\n");
+        return 0;
+    }
+//USB task creation, highest priority
+    result = xTaskCreate(usbTask, "usb", DEF_STACK_SIZE, NULL, 4, &hUSB);
+    if(result != pdPASS) {
+        printf("USB Task creation failed\n");
+        return 0;
+    }
+
+    tusb_init();
+    usb_serial_init();
+    vTaskStartScheduler();
+ }
